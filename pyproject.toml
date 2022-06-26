@@ -1,6 +1,7 @@
 [tool.poetry]
 name = "pysinter"
 version = "0.1.0"
+license = "LGPL-3.0-or-later"
 description = ""
 authors = ["florp <jens.krewald@gmail.com>"]
 
