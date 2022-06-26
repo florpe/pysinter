@@ -7,6 +7,12 @@ from pysinter import FUSEError, ENCODING, BYTEORDER, frombytes
 
 INFINITY = float('inf')
 
+async def dyn_nop(header, parsed):
+    '''
+    Do nothing.
+    '''
+    return 0, {}
+
 class Operations():
     '''
     A class to run per-opcode functions against a pair of asynchronous RX and
@@ -146,13 +152,16 @@ def _format_gen(fmt, inpt):
         size_raw = v['size']
         if size_raw is None:
             if v.get('cstringposition') is None:
-                if not isinstance(res, bytes):
-                    raise ValueError(
-                        'Data field must be given as bytes'
-                        , k, res, v, inpt
-                        )
-                yield res
-                continue
+                if res is None:
+                    yield b''
+                    continue
+                if isinstance(res, bytes):
+                    yield res
+                    continue
+                raise ValueError(
+                    'Data field must be given as bytes'
+                    , k, res, v, inpt
+                    )
             elif isinstance(res, bytes):
                 try:
                     assert res.index(0) == len(res) - 1

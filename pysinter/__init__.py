@@ -47,6 +47,10 @@ class FUSEError(Exception):
         return None
 
 def parse_header_req(buffer):
+    '''
+    The header format has not changed since 2005 (as of 2022), so there's no
+    need to version this parser.
+    '''
     return Header(
         frombytes(buffer[4:8])
         , bytes(buffer[8:16])
@@ -54,7 +58,6 @@ def parse_header_req(buffer):
         , frombytes(buffer[24:28])
         , frombytes(buffer[28:32])
         , frombytes(buffer[32:36])
-#        , frombytes(buffer[36:40]) # Padding
         )
 
 class Sinter():
@@ -91,48 +94,7 @@ class Sinter():
         self.receiving = True #Is this the right way to stop the operation?
         self.sending = True #Is this the right way to stop the operation?
 
-        self._major = None #TODO: Remove
-        self._minor = None #TODO: Remove
         return None
-    def negotiate(self, major, minor, flags=0, max_readahead=MAX32, max_background=MAX16):
-        '''
-        Legacy - should not be here.
-        '''
-        raise NotImplementedError
-        header, initdata, body = self._recv() #Outdated, should do the parsing itself
-        assert header.opcode == FUSE_INIT
-        if major < initdata.major:
-            resbody = to32(major)
-            self._send(header, 0, resbody)
-            header, initdata, body = self._recv()
-            assert header.opcode == FUSE_INIT
-            assert major == initdata.major #Is this the right thing to do?
-        elif initdata.major < major:
-            major = initdata.major
-            minor = initdata.minor #Is this the right thing to do?
-        else:
-            pass
-        agreed_minor = min(minor, initdata.minor)
-        flagbytes = to64(flags)
-        max_write = len(self._recvbuf) - HEADER_SIZE_RECV - HEADER_SIZE_WRITE
-        assert max_write > 0
-        max_pages = (max_write - 1) // (getpagesize() + 1)
-        resbody = b''.join([
-            to32(major)
-            , to32(minor)
-            , to32(max_readahead)
-            , flagbytes[:4]
-            , to16(max_background)
-            , to16((max_background * 3) // 4) # Hardcoded congestion threshold
-            , to32(max_write)
-            , to32(1) # time_gran
-            , to16(max_pages) # max_pages
-            , to16(0) # map_alignment?
-            , flagbytes[4:8] # flags2
-            , 7*to32(0) # Padding
-            ])
-        self._send(header, 0, resbody)
-        return major, agreed_minor
     def _recv(self):
         '''
         Read from fd and queue synchronously.
@@ -171,7 +133,6 @@ class Sinter():
             writebuffers = (sendbuf, msg)
         else:
             writebuffers = (sendbuf,)
-        print(f'@@@ {total=} {writebuffers=}')
         numsent = writev(self._fd, writebuffers)
         return (numsent == total)
     def recv_loop(self):

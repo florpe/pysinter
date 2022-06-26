@@ -4,13 +4,13 @@ from os import getuid, getgid
 from stat import S_IFDIR, S_IFREG
 
 from pysinter import FUSEError, ROOT_INODE, MAX32, pad64, to32, to64
-from pysinter.dynamic import Operations
+from pysinter.dynamic import Operations, dyn_nop
 
 FILE_HELLO = b'hello'
 MSG_HELLO = b'hello, world'
 DIRENT_HELLO = b''.join([
     to64(ROOT_INODE + 1)
-    , to64(32) # Our file name fits into the 64 bits until the padding boundary
+    , to64(32)
     , to32(len(FILE_HELLO) + 1)
     , to32(S_IFREG >> 12)
     , pad64(FILE_HELLO)
@@ -73,9 +73,6 @@ async def hello_opendir(header, parsed):
         raise FUSEError(ENOENT)
     return 0, {'fh': ROOT_INODE}
 
-async def hello_releasedir(header, parsed):
-    return 0, {}
-
 async def hello_readdir(header, parsed):
     if header.nodeid != ROOT_INODE:
         raise FUSEError(ENOENT)
@@ -86,19 +83,6 @@ async def hello_readdir(header, parsed):
 async def hello_forget(header, parsed):
     return 0, None
 
-async def hello_xattr(header, parsed):
-    return ENOTSUP, b''
-
-async def hello_getxattr(header, parsed):
-    '''
-    Abusing this for both GETXATTR and LISTXATTR, since in both cases we have
-    no data to provide.
-    '''
-    return 0, {'size': 0, 'data': b''}
-
-async def hello_nop(header, parsed):
-    return 0, {}
-
 async def hello_read(header, parsed):
     return 0, {'data': MSG_HELLO}
 
@@ -108,13 +92,13 @@ FS_HELLO = {
     , 'FUSE_LOOKUP' : hello_lookup
     , 'FUSE_OPENDIR' : hello_opendir
     , 'FUSE_READDIR': hello_readdir
-    , 'FUSE_RELEASEDIR': hello_releasedir
+    , 'FUSE_RELEASEDIR': dyn_nop
     , 'FUSE_FORGET': hello_forget
-    , 'FUSE_GETXATTR': hello_getxattr
-    , 'FUSE_LISTXATTR': hello_getxattr
-    , 'FUSE_OPEN': hello_nop
-    , 'FUSE_RELEASE': hello_nop
-    , 'FUSE_FLUSH': hello_nop
+    , 'FUSE_GETXATTR': dyn_nop
+    , 'FUSE_LISTXATTR': dyn_nop
+    , 'FUSE_OPEN': dyn_nop
+    , 'FUSE_RELEASE': dyn_nop
+    , 'FUSE_FLUSH': dyn_nop
     , 'FUSE_READ': hello_read
     }
 

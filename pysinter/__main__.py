@@ -7,6 +7,13 @@ from pysinter.dynamic import Operations
 from pysinter.examples.hello import FS_HELLO
 
 async def main():
+    '''
+    Testing the components. No threading, the FUSE read write loop runs
+    synchronously in this function.
+
+    TODO: A bit of an interface. Specifying protocol location and version
+            would be nice, for example.
+    '''
     with open('../sinter/protocol/protocol.json') as handle:
         protocol = load(handle)
     s = Sinter(fd='FUSEFD')
@@ -25,42 +32,6 @@ async def main():
             errno = e.errno
             resmsg = b''
         s._send(header, errno, resmsg)
-
-
-async def main_():
-    print("Hello, world!")
-    with open('../sinter/protocol/protocol.json') as handle:
-        protocol = load(handle)
-    print(dumps(protocol, indent=2))
-    s = Sinter(fd='FUSEFD')
-    ops = Operations(protocol["v7.31"], FS_HELLO)
-    first_header, first_body = s._recv()
-    parsed = ops.parse(first_header.opcode, first_body)
-    print(first_header)
-    print(first_body)
-    print(parsed)
-    response = {
-        'major': 7
-        , 'minor': 31
-        , 'maxReadAhead': MAX32
-        , 'flags': 0
-        , 'maxBackground': 4
-        , 'congestionThreshold': 4
-        , 'maxWrite': 1024
-        , 'timeGran': 0
-        , 'maxPages': 16
-        }
-    formatted = ops.format(first_header.opcode, response)
-    print(formatted)
-    res = s._send(first_header, 0, formatted)
-    print(res)
-    second_header, second_body = s._recv()
-    parsed = ops.parse(second_header.opcode, second_body)
-    print(second_header)
-    print(second_body)
-    print(parsed)
-    # Get fd
-    # Run sample FS
 
 
 if __name__ == "__main__":
