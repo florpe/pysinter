@@ -1,5 +1,6 @@
 
 from collections import namedtuple
+from errno import ENODEV
 from os import environ, read, readv, writev, close
 from resource import getpagesize
 
@@ -32,19 +33,34 @@ to32 = lambda x: int.to_bytes(x, 4, BYTEORDER)
 to64 = lambda x: int.to_bytes(x, 8, BYTEORDER)
 
 def pad64(inpt):
-    residue = len(inpt) % 64
+    '''
+    Exactly what it says on the tin: Pad to 64 bits.
+    '''
+    residue = len(inpt) % 8
     if not residue:
         return inpt
-    return inpt + bytes(64 - residue)
+    return inpt + bytes(8 - residue)
 
 Header = namedtuple('Header', ('opcode', 'unique', 'nodeid', 'uid', 'gid', 'pid'))
 
 class FUSEError(Exception):
+    '''
+    Custom exception to signal errors.
+    '''
     def __init__(self, errno, *args):
+        '''
+        Initialization to create an always-available errno member.
+        '''
         self.errno = errno
         self.msg = None if not args else args[0]
         self.params = tuple(args[1:])
         return None
+
+class FUSEUnmountError(Exception):
+    '''
+    A more specific wrapper for ENODEV.
+    '''
+    pass
 
 def parse_header_req(buffer):
     '''
@@ -64,6 +80,7 @@ class Sinter():
     '''
     A class to expose a FUSE-mounted file descritor as a pair of async-capable
     RX and TX queues.
+    Will raise FUSEUnmountError on unmount.
     '''
     def __init__(self, fd=None, bufsize=MINIMUM_BUFFER_SIZE):
         '''
@@ -139,15 +156,25 @@ class Sinter():
         '''
         Run self._recv() in a loop.
         '''
-        while self.receiving:
-            msg = self._recv()
-            self.rx_sync.put(msg)
+        try:
+            while self.receiving:
+                msg = self._recv()
+                self.rx_sync.put(msg)
+        except OSError as e:
+            if e.errno == ENODEV:
+                raise FUSEUnmountError from e
+            raise
         return None
     def send_loop(self):
         '''
         Run self._send(...) in a loop.
         '''
-        while self.sending:
-            header, errno, msg = self.tx_sync.get()
-            self._send(header, errno, msg)
+        try:
+            while self.sending:
+                header, errno, msg = self.tx_sync.get()
+                self._send(header, errno, msg)
+        except OSError as e:
+            if e.errno == ENODEV:
+                raise FUSEUnmountError from e
+            raise
         return None

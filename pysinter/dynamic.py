@@ -1,7 +1,7 @@
 
 from asyncio import create_task, all_tasks, gather
-from asyncio import create_task, all_tasks, gather
 from errno import ENOSYS
+from json import dumps
 
 from pysinter import FUSEError, ENCODING, BYTEORDER, frombytes
 
@@ -12,6 +12,121 @@ async def dyn_nop(header, parsed):
     Do nothing.
     '''
     return 0, {}
+async def dyn_nosend(header, parsed):
+    '''
+    Do nothing, not even header replying.
+    '''
+    return 0, None
+
+def _flatten(structs, schema, offset=0):
+    '''
+    Extracts information about field makeup from the schema, recursing into
+    nested struct fields. Assumption: The field names do not conflict with
+    the struct member names.
+    '''
+    pos = 0
+    for k, v in schema.items():
+        structname = v.get('struct')
+        raw_size = v['size']
+        raw_offset = v['offset']
+        if raw_offset is not None and pos is not None:
+            if raw_offset // 8 != pos:
+                raise ValueError('Documented offset does not match experimental data', k, v, schema)
+        if raw_size is not None:
+            fieldsize = raw_size // 8
+            newpos = pos + fieldsize
+        else:
+            fieldsize = None
+            newpos = None
+        if structname is None:
+            yield k, (None if pos is None else offset + pos, fieldsize, dict(v))
+        else:
+            for subentry in _flatten(structs, structs[structname]['fields'], offset=offset + pos):
+                yield subentry
+        pos = newpos
+
+def _after_flatten_key(inpt):
+    '''
+    Sort after flattening.
+    '''
+    offset = inpt[1][0]
+    if offset is None:
+        offset = INFINITY
+    return offset, inpt[1][2].get('cstringposition', INFINITY)
+
+class Formatter():
+    '''
+    Parsing and formatting FUSE messages for one opcode and one direction
+    according to the schema.
+    '''
+    def __init__(self, structs, name, schema):
+        '''
+        Initialization: Schema extraction and flattening.
+        '''
+        self._name = name
+        self._structs = structs
+        if schema == None:
+            self._exception = ConnectionError('This opcode does not support this operation', self._name)
+            self._schema = None
+        elif schema == -1:
+            self._exception = NotImplementedError
+            self._schema = None
+        else:
+            self._exception = None
+            self._schema = tuple(sorted(_flatten(structs, schema), key=_after_flatten_key))
+        return None
+    def parse(self, inpt):
+        '''
+        Parsing: From message to dictionary.
+        '''
+        if self._exception is not None:
+            raise self._exception
+        res = {}
+        pos = 0
+        for fieldname, (offset, size, data) in self._schema:
+            if size is None:
+                cstrpos = data.get('cstringposition')
+                if cstrpos is None:
+                    res[fieldname] = inpt[pos:]
+                    break
+                nullbytepos = inpt.find(b'\x00', pos)
+                if nullbytepos == -1:
+                    raise ValueError('Bad C string', inpt, self._name, self._schema)
+                res[fieldname] = inpt[pos:nullbytepos]
+                pos = nullbytepos + 1
+                continue
+            fieldbytes = inpt[pos:pos+size]
+            if size <= 8:
+                res[fieldname] = frombytes(fieldbytes)
+                if data.get('signed', False) and 0x80 & inpt[pos]: #Assuming endianness here
+                    res = res - 256**size #Is this correct?
+            else:
+                res[fieldname] = fieldbytes
+            pos = pos + size
+        return res
+    def generate_fields(self, inpt):
+        '''
+        Formatting: From dictionary to stream of fields.
+        '''
+        if self._exception is not None:
+            raise self._exception
+        for fieldname, (offset, size, data) in self._schema:
+            if size is None:
+                outval = inpt.get(fieldname, b'')
+                cstrpos = data.get('cstringposition')
+                if cstrpos is None:
+                    yield outval
+                    break
+                yield outval + b'\x00'
+                continue
+            if size <= 8:
+                outval = inpt.get(fieldname, 0)
+                yield outval.to_bytes(size, BYTEORDER, signed=data.get('signed', False))
+            else:
+                yield inpt.get(fieldname, bytes(size))
+
+
+
 
 class Operations():
     '''
@@ -21,10 +136,6 @@ class Operations():
     and produce dictionaries of field values. These dictionaries are extracted
     from and converted to FUSE messages according to the schema supplied with
     the first parameter.
-
-    TODO: Currently all the formatting happens using dicts straight from the
-            schema. Perhaps it would be nice to have a Formatter class to take
-            care of verification and ensure efficient operation.
     '''
     def __init__(self, schema, action_by_opcode):
         self.active = True
@@ -37,63 +148,41 @@ class Operations():
             opcode_value: opcode_name
             for opcode_name, opcode_value in schema['opcodes'].items()
             }
-        self._format_in = {
-            opcode_value: _sorted_by_pos(schema['operations'].get(opcode_name, {}).get('request'))
+        self._formatter_request = {
+            opcode_value: Formatter(schema['structs'], opcode_name, schema['operations'].get(opcode_name, {}).get('request'))
             for opcode_name, opcode_value in schema['opcodes'].items()
             }
-        self._format_out = {
-            opcode_value: _sorted_by_pos(schema['operations'].get(opcode_name, {}).get('response'))
+        self._formatter_response = {
+            opcode_value: Formatter(schema['structs'], opcode_name, schema['operations'].get(opcode_name, {}).get('response'))
             for opcode_name, opcode_value in schema['opcodes'].items()
             }
         return None
     def format(self, opcode, inpt):
+        '''
+        Run the opcode's response formatter.
+        '''
         if inpt is None:
             return None
-        fmt = self._format_out.get(opcode)
+        fmt = self._formatter_response.get(opcode)
         if fmt is None:
             raise FUSEError(ENOSYS, "Opcode without formatter", opcode, inpt)
-        return b''.join(_format_gen(fmt, inpt))
+        return b''.join(fmt.generate_fields(inpt))
     def parse(self, opcode, inpt):
-        fmt = self._format_in.get(opcode)
-        if fmt is None:
-            raise FUSEError(ENOSYS, "Opcode without parser", opcode, inpt)
-        return self._parse(fmt, inpt)
-    def parse_output(self, opcode, inpt):
-        fmt = self._format_out.get(opcode)
+        '''
+        Run the opcode's request parser.
+        '''
+        fmt = self._formatter_request.get(opcode)
         if fmt is None:
             raise FUSEError(ENOSYS, "Opcode without formatter", opcode, inpt)
-        return self._parse(fmt, inpt)
-    def _parse(self, fmt, inpt):
-        resdict = {}
-        for fieldname, spec in fmt.items():
-            if spec.get('padding'):
-                continue
-            offset = spec['offset'] // 8
-            size_raw = spec['size']
-            if size_raw is None: #NULL terminated string or blob
-                cstrpos = spec.get('cstringposition')
-                if cstrpos is None:
-                    resdict[fieldname] = inpt[offset:]
-                    continue
-                while True:
-                    lastpos = offset
-                    nullbytepos = inpt.find(b'\x00', lastpos)
-                    if nullbytepos == -1:
-                        raise ValueError('Bad C string', inpt, spec)
-                    if not cstrpos:
-                        resdict[fieldname] = inpt[lastpos:nullbytepos]
-                        break
-                    cstrpos = cstrpos - 1
-                continue
-            size = size_raw // 8
-            if size <= 8:
-                res = frombytes(inpt[offset:offset+size])
-                if spec.get('signed', False) and 0x80 & inpt[offset]: #Assuming endianness here
-                    res = res - 256**size #Is this correct?
-                resdict[fieldname] = res
-            else:
-                resdict[fieldname] = inpt[offset:offset+size]
-        return resdict
+        return fmt.parse(inpt)
+    def parse_output(self, opcode, inpt):
+        '''
+        Run the opcode's response parser.
+        '''
+        fmt = self._formatter_response.get(opcode)
+        if fmt is None:
+            raise FUSEError(ENOSYS, "Opcode without formatter", opcode, inpt)
+        return fmt.parse(inpt)
     async def _complete_one(self, tx, header, msg):
         opcode = header.opcode
         operation = self._action_by_opcode.get(opcode)
@@ -117,95 +206,3 @@ class Operations():
             create_task(self._complete_one(tx, header, msg))
         await gather(*all_tasks()) #TODO: Make sure we only catch FUSE tasks here
         return None
-
-
-def _sort_by_pos(tpl):
-    v = tpl[1]
-    offset = v['offset']
-    if offset is None:
-        offset = INFINITY
-    return (offset, v.get('cstringposition', INFINITY))
-
-def _sorted_by_pos(inpt):
-    '''
-    Helper that enables correct operation even when the schema does not
-    give an operation's fields ordered by their positions.
-
-    TODO: Validate that the schema does not leave gaps and has no misplaced
-    variable-length fields.
-    '''
-    if not isinstance(inpt, dict):
-        return inpt
-    res = {}
-    for k, v in sorted(inpt.items(), key=_sort_by_pos):
-        res[k] = v
-    return res
-
-def _format_gen(fmt, inpt):
-    if fmt is None:
-        return
-    for k, v in fmt.items():
-        if v.get('padding', False):
-            yield bytes(size)
-            continue
-        res = inpt.get(k)
-        size_raw = v['size']
-        if size_raw is None:
-            if v.get('cstringposition') is None:
-                if res is None:
-                    yield b''
-                    continue
-                if isinstance(res, bytes):
-                    yield res
-                    continue
-                raise ValueError(
-                    'Data field must be given as bytes'
-                    , k, res, v, inpt
-                    )
-            elif isinstance(res, bytes):
-                try:
-                    assert res.index(0) == len(res) - 1
-                except (IndexError, AssertionError) as e:
-                    raise ValueError(
-                        'String fields must contain exactly one null ' +
-                            'byte that must be placed at index -1 .'
-                        , k, res, v, inpt
-                        ) from e
-                yield res
-                continue
-            elif isinstance(res, str):
-                yield res.encode(ENCODING) + b'\x00'
-                continue
-            else:
-                raise ValueError(
-                    'String fields must be given as str or ' +
-                        'null-terminated bytes'
-                    , k, res, v, inpt
-                    )
-        size = size_raw // 8
-        if res is None:
-            yield bytes(size)
-            continue
-        elif isinstance(res, bytes):
-            if len(res) != size:
-                raise ValueError(
-                    'Bad bytes size for field'
-                    , k, res, v, inpt
-                    )
-            yield res
-            continue
-        elif isinstance(res, int):
-            signed = v.get('signed', False)
-            try:
-                yield res.to_bytes(size, BYTEORDER, signed=signed)
-            except OverflowError as e:
-                raise ValueError(
-                    'Bad int size for field'
-                    , k, res, v, inpt
-                    ) from e
-            continue
-        else:
-            raise ValueError(
-                'Fixed-length fields must be given as bytes, int, or None'
-                , k, res, v, inpt
-                )
