@@ -1,5 +1,6 @@
 
 from asyncio import create_task, all_tasks, gather
+from copy import deepcopy
 from errno import ENOSYS
 from json import dumps
 
@@ -18,114 +19,200 @@ async def dyn_nosend(header, parsed):
     '''
     return 0, None
 
-def _flatten(structs, schema, offset=0):
-    '''
-    Extracts information about field makeup from the schema, recursing into
-    nested struct fields. Assumption: The field names do not conflict with
-    the struct member names.
-    '''
-    pos = 0
-    for k, v in schema.items():
-        structname = v.get('struct')
-        raw_size = v['size']
-        raw_offset = v['offset']
-        if raw_offset is not None and pos is not None:
-            if raw_offset // 8 != pos:
-                raise ValueError('Documented offset does not match experimental data', k, v, schema)
-        if raw_size is not None:
-            fieldsize = raw_size // 8
-            newpos = pos + fieldsize
-        else:
-            fieldsize = None
-            newpos = None
-        if structname is None:
-            yield k, (None if pos is None else offset + pos, fieldsize, dict(v))
-        else:
-            for subentry in _flatten(structs, structs[structname]['fields'], offset=offset + pos):
-                yield subentry
-        pos = newpos
-
-def _after_flatten_key(inpt):
-    '''
-    Sort after flattening.
-    '''
-    offset = inpt[1][0]
+def _struct_key(inpt):
+    fieldval = inpt[1]
+    offset = fieldval['offset']
     if offset is None:
         offset = INFINITY
-    return offset, inpt[1][2].get('cstringposition', INFINITY)
+    cstringpos = fieldval.get('cstringposition', INFINITY)
+    return (offset, cstringpos)
+
+def _replace_struct(logger, structs, schema, schema_is_struct=False):
+    if schema_is_struct:
+        res = {
+            None: {
+                'structname': schema['structname']
+                , 'pad_to': schema.get('pad_to', 0)
+                }
+            }
+        schema = deepcopy(schema['fields'])
+    else:
+        schema = deepcopy(schema)
+        res = {}
+    for fieldname, fieldval in sorted(schema.items(), key=_struct_key):
+        structname = fieldval.get('struct')
+        resval = deepcopy(fieldval)
+        if structname is not None: #Recursion shouldn't go too deep here
+            struct = _replace_struct(
+                logger.getChild(structname)
+                , structs
+                , structs[structname]
+                , schema_is_struct=True
+                )
+            resval['struct'] = struct
+        res[fieldname] = resval
+    return res
+
+def _generate_fields(logger, schema, inpt, is_struct=False):
+    logger.debug('Generating: %s , %s', schema, inpt)
+    #TODO: Padding
+    pos = 0
+    meta = schema.get(None, {})
+    for fname, fshape in schema.items():
+        if fname is None:
+            continue
+        struct = fshape.get('struct')
+        if struct:
+            #TODO: Repeating structs
+            for pos, val in _generate_fields(
+                logger.getChild(fname)
+                , struct
+                , inpt.get(fname, {})
+                , is_struct=True
+                ):
+                yield pos, val
+            continue
+        size = fshape['size']
+        if size is None:
+            cstrpos = schema.get('cstringposition')
+            if cstrpos is None:
+                val = inpt.get(fname, b'')
+                logger.debug(
+                    'Yielding data field %s value %s'
+                    , fname, val
+                    )
+            else:
+                val = inpt.get(fname, b'') + b'\x00'
+                logger.debug(
+                    'Yielding cstring field %s value %s'
+                    , fname, val
+                    )
+        elif size <= 64:
+            bytesize = size // 8
+            #Assuming endianness here
+            signed = fshape.get('signed')
+            val = inpt.get(fname, 0).to_bytes(
+                bytesize
+                , BYTEORDER
+                , signed=signed
+                )
+            logger.debug(
+                    'Yielding small value field %s value %s'
+                    , fname, val
+                    )
+        else:
+            bytesize = size // 8
+            val = inpt.get(fname, bytes(bytesize))
+            if len(val) != bytesize:
+                raise ValueError('Bad field size', fname, val, schema)
+            logger.debug(
+                'Yielding large value field %s value %s'
+                , fname, val
+                )
+        pos = pos + len(val)
+        yield pos, val
+    pad_to = meta.get('pad_to', 0) // 8
+    if pad_to:
+        missing = -pos % pad_to
+        if missing:
+            yield pos + missing, bytes(missing)
+
+def _parse_fields(logger, schema, inpt, position):
+    res = {}
+    meta = schema.get(None, {})
+    for fname, fshape in schema.items():
+        if fname is None:
+            continue
+        struct = fshape.get('struct')
+        if struct:
+            position, fval = _parse_fields(
+                logger.getChild(struct[None]['structname'])
+                , struct
+                , inpt
+                , position
+                )
+            res[fname] = fval
+            continue
+        size = fshape['size']
+        if size is None:
+            cstrpos = fshape.get('cstringposition')
+            if cstrpos is None:
+                #TODO: This only works if this struct is last in line
+                res[fname] = inpt[position:]
+                position = len(inpt)
+                break
+            nullbytepos = inpt.find(b'\x00', position)
+            if nullbytepos == -1:
+                raise ValueError(
+                    'Bad C string'
+                    , fname, fshape, position, inpt
+                    )
+            res[fname] = inpt[position:nullbytepos]
+            position = nullbytepos + 1
+            continue
+        realsize = size // 8
+        val_raw = inpt[position:position+realsize] 
+        if realsize <= 8:
+            signed = fshape.get('signed')
+            res[fname] = int.from_bytes(
+                val_raw
+                , byteorder=BYTEORDER
+                , signed=signed
+                )
+        else:
+            res[fname] = val_raw
+        position = position + realsize
+    pad_to = meta.get('pad_to', 0) // 8
+    if pad_to:
+        position = position + (-position % pad_to)
+    return position, res
 
 class Formatter():
-    '''
-    Parsing and formatting FUSE messages for one opcode and one direction
-    according to the schema.
-    '''
-    def __init__(self, structs, name, schema):
-        '''
-        Initialization: Schema extraction and flattening.
-        '''
+    def __init__(self, logger, structs, name, schema):
         self._name = name
-        self._structs = structs
-        if schema == None:
-            self._exception = ConnectionError('This opcode does not support this operation', self._name)
+        self._logger = logger
+        if schema == -1:
             self._schema = None
-        elif schema == -1:
             self._exception = NotImplementedError
+        elif schema is None:
             self._schema = None
+            self._exception = ConnectionError(
+                'This opcode does not support this operation'
+                , self._name
+                )
         else:
+            self._schema = _replace_struct(logger, structs, schema)
             self._exception = None
-            self._schema = tuple(sorted(_flatten(structs, schema), key=_after_flatten_key))
         return None
     def parse(self, inpt):
         '''
         Parsing: From message to dictionary.
         '''
-        if self._exception is not None:
+        if self._exception:
             raise self._exception
-        res = {}
-        pos = 0
-        for fieldname, (offset, size, data) in self._schema:
-            if size is None:
-                cstrpos = data.get('cstringposition')
-                if cstrpos is None:
-                    res[fieldname] = inpt[pos:]
-                    break
-                nullbytepos = inpt.find(b'\x00', pos)
-                if nullbytepos == -1:
-                    raise ValueError('Bad C string', inpt, self._name, self._schema)
-                res[fieldname] = inpt[pos:nullbytepos]
-                pos = nullbytepos + 1
-                continue
-            fieldbytes = inpt[pos:pos+size]
-            if size <= 8:
-                res[fieldname] = frombytes(fieldbytes)
-                if data.get('signed', False) and 0x80 & inpt[pos]: #Assuming endianness here
-                    res = res - 256**size #Is this correct?
-            else:
-                res[fieldname] = fieldbytes
-            pos = pos + size
+        respos, res = _parse_fields(
+            self._logger.getChild('parse')
+            , self._schema
+            , inpt
+            , 0
+            )
+        if respos != len(inpt):
+            raise ValueError(
+                'Incomplete parse'
+                , self._name, respos, res, self._schema, inpt
+                )
         return res
     def generate_fields(self, inpt):
         '''
         Formatting: From dictionary to stream of fields.
         '''
-        if self._exception is not None:
+        if self._exception:
             raise self._exception
-        for fieldname, (offset, size, data) in self._schema:
-            if size is None:
-                outval = inpt.get(fieldname, b'')
-                cstrpos = data.get('cstringposition')
-                if cstrpos is None:
-                    yield outval
-                    break
-                yield outval + b'\x00'
-                continue
-            if size <= 8:
-                outval = inpt.get(fieldname, 0)
-                yield outval.to_bytes(size, BYTEORDER, signed=data.get('signed', False))
-            else:
-                yield inpt.get(fieldname, bytes(size))
-
-
+        return _generate_fields(
+            self._logger.getChild('generate')
+            , self._schema
+            , inpt
+            )
 
 
 class Operations():
@@ -137,8 +224,9 @@ class Operations():
     from and converted to FUSE messages according to the schema supplied with
     the first parameter.
     '''
-    def __init__(self, schema, action_by_opcode):
+    def __init__(self, logger, schema, action_by_opcode):
         self.active = True
+        self._logger = logger
         self._action_by_opcode = {
             opcode_value: action_by_opcode.get(opcode_name)
             for opcode_name, opcode_value in schema['opcodes'].items()
@@ -149,11 +237,21 @@ class Operations():
             for opcode_name, opcode_value in schema['opcodes'].items()
             }
         self._formatter_request = {
-            opcode_value: Formatter(schema['structs'], opcode_name, schema['operations'].get(opcode_name, {}).get('request'))
+            opcode_value: Formatter(
+                logger.getChild(opcode_name)
+                , schema['structs']
+                , opcode_name
+                , schema['operations'].get(opcode_name, {}).get('request')
+                )
             for opcode_name, opcode_value in schema['opcodes'].items()
             }
         self._formatter_response = {
-            opcode_value: Formatter(schema['structs'], opcode_name, schema['operations'].get(opcode_name, {}).get('response'))
+            opcode_value: Formatter(
+                logger.getChild(opcode_name)
+                , schema['structs']
+                , opcode_name
+                , schema['operations'].get(opcode_name, {}).get('response')
+                )
             for opcode_name, opcode_value in schema['opcodes'].items()
             }
         return None
@@ -166,7 +264,7 @@ class Operations():
         fmt = self._formatter_response.get(opcode)
         if fmt is None:
             raise FUSEError(ENOSYS, "Opcode without formatter", opcode, inpt)
-        return b''.join(fmt.generate_fields(inpt))
+        return b''.join((field for _, field in fmt.generate_fields(inpt)))
     def parse(self, opcode, inpt):
         '''
         Run the opcode's request parser.

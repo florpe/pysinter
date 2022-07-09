@@ -1,9 +1,9 @@
-
-from errno import ENOSYS, ENOENT, EACCES, ENOTSUP
+from errno import ENOENT
 from os import getuid, getgid
 from stat import S_IFDIR, S_IFREG
 
 from pysinter import FUSEError, ROOT_INODE, MAX32, pad64, to32, to64
+from pysinter.helper import mk_dirent
 from pysinter.dynamic import Operations, dyn_nop, dyn_nosend
 
 FILE_HELLO = b'hello'
@@ -16,24 +16,34 @@ DIRENT_HELLO = b''.join([
     , pad64(FILE_HELLO)
     ])
 
+DIRENT_HELLO_ = mk_dirent(ROOT_INODE + 1, FILE_HELLO, S_IFREG, 1)
+
 ATTRS_HELLO = {
-    'ino': 0
-    , 'size': len(MSG_HELLO)
-    , 'mode': S_IFREG | 0o644
-    , 'uid': getuid()
-    , 'gid': getgid()
-    , 'blksize': 512
-    , 'blocks': 1
-    , 'nlink': 1
+    "attr": {
+        'ino': 0
+        , 'size': len(MSG_HELLO)
+        , 'timeandmode': {
+            'mode': S_IFREG | 0o644
+            , 'uid': getuid()
+            , 'gid': getgid()
+            }
+        , 'blksize': 512
+        , 'blocks': 1
+        , 'nlink': 1
+        }
     }
 ATTRS_ROOT = {
-    'ino': 0
-    , 'size': 0
-    , 'mode': S_IFDIR | 0o755
-    , 'uid': getuid()
-    , 'gid': getgid()
-    , 'blksize': 512
-    , 'nlink': 1
+    "attr": {
+        'ino': 0
+        , 'size': 0
+        , 'timeandmode': {
+            'mode': S_IFDIR | 0o755
+            , 'uid': getuid()
+            , 'gid': getgid()
+            }
+        , 'blksize': 512
+        , 'nlink': 1
+        }
     }
 
 async def hello_fakeinit(header, parsed):
@@ -69,12 +79,12 @@ async def hello_lookup(header, parsed):
     if header.nodeid != ROOT_INODE:
         raise FUSEError(ENOENT)
     if parsed['name'] != FILE_HELLO:
-        print('Bad filename', parsed['name'])
+        print('Bad filename', parsed['name'], parsed)
         raise FUSEError(ENOENT)
-    return 0, {
+    return 0, {'entry': {
         ** ATTRS_HELLO
         , 'nodeId': ROOT_INODE + 1
-        }
+        }}
 
 async def hello_opendir(header, parsed):
     '''
@@ -90,9 +100,21 @@ async def hello_readdir(header, parsed):
     '''
     if header.nodeid != ROOT_INODE:
         raise FUSEError(ENOENT)
-    if parsed['offset'] == 0:
-        return 0, {'data': DIRENT_HELLO}
-    return 0, {'data': b''}
+    if parsed['cookie'] == 0:
+        namelen = len(FILE_HELLO)
+        residue = (len(FILE_HELLO) + 1) % 8
+        padding = bytes(8 - residue) if residue else b''
+        return 0, {"data": {
+            "ino": ROOT_INODE + 1
+            , "cookie": 1
+            , "namelen": namelen
+            , "type": (S_IFREG >> 12)
+            , "name": FILE_HELLO
+            , "padding": padding
+            }}
+    print('Readdir fell through')
+    return 0, b''
+
 
 async def hello_read(header, parsed):
     return 0, {'data': MSG_HELLO}
