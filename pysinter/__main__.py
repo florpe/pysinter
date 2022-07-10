@@ -6,6 +6,7 @@ from logging import getLogger
 from pysinter import Sinter, MAX32, FUSEError
 from pysinter.dynamic import Operations
 from pysinter.examples.hello import FS_HELLO
+from pysinter.examples.passthrough import LIBC
 
 LOGGER = getLogger(__name__)
 
