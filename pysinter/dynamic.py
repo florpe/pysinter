@@ -55,14 +55,12 @@ def _replace_struct(logger, structs, schema, schema_is_struct=False):
 
 def _generate_fields(logger, schema, inpt, is_single_instance=False, is_struct=False, pos=0):
     logger.debug('Generating: %s , %s', schema, inpt)
-    #TODO: Padding
     meta = schema.get(None, {})
     for fname, fshape in schema.items():
         if fname is None:
             continue
         struct = fshape.get('struct')
         if struct:
-            #TODO: Repeating structs
             if fshape.get('zero_or_more') and not is_single_instance:
                 instances = inpt.get(fname, [])
                 if isinstance(instances, dict):

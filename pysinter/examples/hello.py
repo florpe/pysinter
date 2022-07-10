@@ -1,15 +1,15 @@
 from errno import ENOENT
+from json import dumps
 from os import getuid, getgid
 from stat import S_IFDIR, S_IFREG
 
 from pysinter import FUSEError, ROOT_INODE, MAX32, pad64, to32, to64
-from pysinter.helper import mk_dirent
 from pysinter.dynamic import Operations, dyn_nop, dyn_nosend
+from pysinter.helper import fuse_negotiate, mk_dyn_negotiate
 
 FILE_HELLO = b'hello'
 INODE_HELLO = ROOT_INODE + 1
 MSG_HELLO = b'Hello, world!'
-
 
 FILE_HELLO2 = b'hello2'
 INODE_HELLO2 = ROOT_INODE + 2
@@ -56,23 +56,6 @@ ATTRS_ROOT = {
         , 'nlink': 1
         }
     }
-
-async def hello_fakeinit(header, parsed):
-    '''
-    An init handler that just assumes a version.
-    '''
-    print('Faking init!')
-    return 0, {
-        'major': 7
-        , 'minor': 31
-        , 'maxReadAhead': MAX32
-        , 'flags': 0
-        , 'maxBackground': 4
-        , 'congestionThreshold': 4
-        , 'maxWrite': 1024
-        , 'timeGran': 0
-        , 'maxPages': 16
-        }
 
 async def hello_getattr(header, parsed):
     '''
@@ -164,7 +147,7 @@ async def hello_read(header, parsed):
     raise FUSEError(ENOENT)
 
 FS_HELLO = {
-    'FUSE_INIT': hello_fakeinit
+    'FUSE_INIT': mk_dyn_negotiate(major=7, minor=31)
     , 'FUSE_GETATTR' : hello_getattr
     , 'FUSE_LOOKUP' : hello_lookup
     , 'FUSE_OPENDIR' : hello_opendir
