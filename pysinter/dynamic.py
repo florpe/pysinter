@@ -79,6 +79,11 @@ def _generate_fields(logger, schema, inpt, is_single_instance=False, is_struct=F
                         )
                 instances = (single_instance,)
             for instancenum, instance in enumerate(instances):
+                # Structs are reported as single bytestrings to enable cutoffs
+                # at struct boundaries when the maximum write size is reached.
+                # Collecting the position value requires the use of a mutable
+                # buffer instead of a direct join.
+                outfields = []
                 for pos, val in _generate_fields(
                     logger.getChild(fname).getChild(str(instancenum))
                     , struct
@@ -87,7 +92,8 @@ def _generate_fields(logger, schema, inpt, is_single_instance=False, is_struct=F
                     , is_struct=True
                     , pos=pos
                     ):
-                    yield pos, val
+                    outfields.append(val)
+                yield pos, b''.join(outfields)
             continue
         size = fshape['size']
         if size is None:
@@ -281,6 +287,7 @@ class Operations():
         fmt = self._formatter_response.get(opcode)
         if fmt is None:
             raise FUSEError(ENOSYS, "Opcode without formatter", opcode, inpt)
+        #TODO: Cut off at a maximum write size here
         return b''.join((field for _, field in fmt.generate_fields(inpt)))
     def parse(self, opcode, inpt):
         '''
