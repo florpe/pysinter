@@ -53,10 +53,9 @@ def _replace_struct(logger, structs, schema, schema_is_struct=False):
         res[fieldname] = resval
     return res
 
-def _generate_fields(logger, schema, inpt, is_struct=False):
+def _generate_fields(logger, schema, inpt, is_single_instance=False, is_struct=False, pos=0):
     logger.debug('Generating: %s , %s', schema, inpt)
     #TODO: Padding
-    pos = 0
     meta = schema.get(None, {})
     for fname, fshape in schema.items():
         if fname is None:
@@ -64,13 +63,31 @@ def _generate_fields(logger, schema, inpt, is_struct=False):
         struct = fshape.get('struct')
         if struct:
             #TODO: Repeating structs
-            for pos, val in _generate_fields(
-                logger.getChild(fname)
-                , struct
-                , inpt.get(fname, {})
-                , is_struct=True
-                ):
-                yield pos, val
+            if fshape.get('zero_or_more') and not is_single_instance:
+                instances = inpt.get(fname, [])
+                if isinstance(instances, dict):
+                    raise ValueError(
+                        'Zero-or-more struct fields demand an iterable of dicts'
+                        , fname, fshape, instances, inpt
+                        )
+            else:
+                single_instance = inpt.get(fname, {})
+                if not isinstance(single_instance, dict):
+                    raise ValueError(
+                        'Exactly-once struct fields demand a dict'
+                        , fname, fshape, inpt
+                        )
+                instances = (single_instance,)
+            for instancenum, instance in enumerate(instances):
+                for pos, val in _generate_fields(
+                    logger.getChild(fname).getChild(str(instancenum))
+                    , struct
+                    , instance
+                    , is_single_instance=True
+                    , is_struct=True
+                    , pos=pos
+                    ):
+                    yield pos, val
             continue
         size = fshape['size']
         if size is None:

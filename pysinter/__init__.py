@@ -1,7 +1,7 @@
 
 from collections import namedtuple
 from errno import ENODEV
-from os import environ, read, readv, writev, close
+from os import environ, read, readv, write, writev, close
 from resource import getpagesize
 
 from janus import Queue
@@ -141,16 +141,12 @@ class Sinter():
         '''
         if msg is None:
             return True
-        total = len(msg) + HEADER_SIZE_SEND
+        total = HEADER_SIZE_SEND + len(msg)
         sendbuf = self._sendbuf
         sendbuf[:4] = to32(total)
-        sendbuf[4:8] = to32(errno)
+        sendbuf[4:8] = (-errno).to_bytes(4, byteorder=BYTEORDER, signed=True)
         sendbuf[8:16] = header.unique
-        if msg:
-            writebuffers = (sendbuf, msg)
-        else:
-            writebuffers = (sendbuf,)
-        numsent = writev(self._fd, writebuffers)
+        numsent = writev(self._fd, (sendbuf, msg))
         return (numsent == total)
     def recv_loop(self):
         '''
