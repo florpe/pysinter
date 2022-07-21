@@ -128,13 +128,13 @@ async def hello_readdir(header, parsed):
                 }
             ]}
     if cookie == 1:
-        return [{
+        return {"data": [{
             "ino": INODE_HELLO2
             , "cookie": 2
             , "namelen": len(FILE_HELLO2)
             , "type": (S_IFREG >> 12)
             , "name": FILE_HELLO2
-            }]
+            }]}
     print('Readdir fell through', parsed)
     return 0, b''
 
@@ -146,6 +146,7 @@ async def hello_read(header, parsed):
         return 0, {'data': MSG_HELLO2}
     raise FUSEError(ENOENT)
 
+#TODO: Can we cut some of these NOPs? They should be from before the fixing of the error codes
 FS_HELLO = {
     'FUSE_INIT': mk_dyn_negotiate(major=7, minor=31)
     , 'FUSE_GETATTR' : hello_getattr

@@ -2,11 +2,12 @@
 from asyncio import run
 from json import load, dumps
 from logging import getLogger
+from os import open as osopen, close as osclose, O_RDWR
 
 from pysinter import Sinter, MAX32, FUSEError
 from pysinter.dynamic import Operations
-from pysinter.examples.hello import FS_HELLO
-from pysinter.examples.passthrough import LIBC
+# from pysinter.examples.hello import FS_HELLO
+from pysinter.examples.passthrough import Passthrough
 
 LOGGER = getLogger(__name__)
 
@@ -21,7 +22,8 @@ async def main():
     with open('../sinter/protocol/protocol.json') as handle:
         protocol = load(handle)
     s = Sinter(fd='FUSEFD')
-    ops = Operations(LOGGER, protocol["v7.31"], FS_HELLO)
+    pt = Passthrough('.')
+    ops = Operations(LOGGER, protocol["v7.31"], pt.make())
     tx = s.tx_async
     tx_sync = s.tx_sync
     while True:

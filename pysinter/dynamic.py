@@ -112,11 +112,13 @@ def _generate_fields(logger, schema, inpt, is_single_instance=False, is_struct=F
             bytesize = size // 8
             #Assuming endianness here
             signed = fshape.get('signed')
-            val = inpt.get(fname, 0).to_bytes(
-                bytesize
-                , BYTEORDER
-                , signed=signed
-                )
+            val = inpt.get(fname, 0)
+            if isinstance(val, int):
+                val = val.to_bytes(
+                    bytesize
+                    , BYTEORDER
+                    , signed=signed
+                    )
             logger.debug(
                     'Yielding small value field %s value %s'
                     , fname, val
