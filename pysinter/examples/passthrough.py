@@ -1,15 +1,15 @@
 
 from errno import ENOENT
 from hashlib import blake2b
-from os import open as osopen, close as osclose, stat, scandir, fsencode, pread
+from os import open as osopen, chmod, chown, utime, close as osclose, stat, scandir, fsencode, pread, pwrite, remove as osremove
 from os.path import join as pjoin
 from stat import S_IFDIR, S_IFREG
 
 from ctypes import CDLL
 from ctypes.util import find_library
 
-from pysinter import FUSEError, ROOT_INODE, BYTEORDER, MAX32, pad64, to32, to64
-from pysinter.helper import fuse_negotiate, mk_dyn_negotiate
+from pysinter import FUSEError, ROOT_INODE, BYTEORDER, ENCODING, MAX32, pad64, to32, to64
+from pysinter.helper import fuse_negotiate, mk_dyn_negotiate, dyn_nosend, dyn_nop
 
 '''
 Work in progress - this passthrough FUSE client should become sufficiently
@@ -35,6 +35,12 @@ def stat_to_attr(data, ino=0):
         , 'gid': data.st_gid
         , 'blksize': data.st_blksize
         , 'nlink': data.st_nlink
+        }
+
+def mk_entry(attr):
+    return {
+        'nodeId': attr['ino']
+        , 'attr': attr
         }
 
 class Passthrough():
@@ -67,7 +73,8 @@ class Passthrough():
         try:
             data = stat(fullname, follow_symlinks=False)
         except FileNotFoundError as e:
-            raise FUSEError(ENOENT) from e
+            # raise FUSEError(ENOENT) from e
+            return ENOENT, {'entry': []} # Works just the same as raise ...
         ino = data.st_ino
         if ino == ROOT_INODE:
             raise NotImplementedError(
@@ -76,10 +83,10 @@ class Passthrough():
                 )
         self._path(ino, name=fullname)
         attr = stat_to_attr(data, ino=ino)
-        res = {'entry': {
+        res = {'entry': [{
             'attr': attr
             , 'nodeId': ino
-            }}
+            }]}
         return 0, res
     async def opendir(self, header, parsed):
         node = header.nodeid
@@ -138,6 +145,67 @@ class Passthrough():
         #TODO: Locks
         osclose(parsed['fh'])
         return 0, {}
+    async def create(self, header, parsed):
+        #TODO: Flags
+        node = header.nodeid
+        if node == ROOT_INODE:
+            node = self._root_ino
+        dirpath = self._path(node)
+        fullpath = pjoin(dirpath, parsed['name'])
+        flags = parsed['flags']
+        fd = osopen(fullpath, flags, mode=(parsed['mode'] ^ parsed['umask']))
+        try:
+            statres = stat(fullpath, follow_symlinks=False)
+        except FileNotFoundError as e:
+            raise FUSEError(ENOENT) from e
+        ino = statres.st_ino
+        self._path(ino, name=fullpath)
+        attr = stat_to_attr(statres, ino=ino)
+        return 0, {
+            'entry': mk_entry(attr)
+            , 'fh': fd
+            , 'openFlags': flags
+            }
+    async def unlink(self, header, parsed):
+        node = header.nodeid
+        if node == ROOT_INODE:
+            node = self._root_ino
+        dirpath = self._path(node)
+        fullpath = pjoin(dirpath, parsed['name'])
+        try:
+            osremove(fullpath)
+        except FileNotFoundError as e:
+            raise FUSEError(ENOENT) from e
+        return 0, {}
+    async def forget(self, header, parsed):
+        node = header.nodeid
+        if node == ROOT_INODE:
+            node = self._root_ino
+        self._ino_to_path.pop(node, None)
+        return 0, None
+    async def write(self, header, parsed):
+        #TODO: Flags
+        #TODO: Locks
+        data = parsed['data']
+        assert len(data) == parsed['size']
+        count = pwrite(parsed['fh'], data, parsed['offset'])
+        return 0, {'size': count}
+    async def setattr(self, header, parsed):
+        #TODO: Flags
+        #TODO: Locks
+        node = header.nodeid
+        fd = parsed['fh']
+        if node == ROOT_INODE:
+            node = self._root_ino
+        time_mode = parsed['timeandmode']
+        fullpath = self._path(node)
+        print('@@@@', fullpath, time_mode)
+        # chown(fd, parsed['uid'], parsed['gid'])
+        chmod(fullpath, time_mode['mode'])
+        utime(fullpath, times=(time_mode['atime'], time_mode['mtime']))
+        # utime(fd, times=(time_mode['atime'], time_mode['mtime']), ns=(time_mode['atimensec'], time_mode['mtimensec']))
+        attr = stat_to_attr(stat(fullpath))
+        return 0, {'attr': attr}
     def make(self):
         return {
         'FUSE_INIT': mk_dyn_negotiate(major=self._major, minor=self._minor, flags=self._flags)
@@ -145,9 +213,15 @@ class Passthrough():
         , 'FUSE_OPENDIR': self.opendir
         , 'FUSE_RELEASEDIR': self.releasedir
         , 'FUSE_READDIR': self.readdir
+        , 'FUSE_CREATE': self.create
+        , 'FUSE_UNLINK': self.unlink
         , 'FUSE_LOOKUP': self.lookup
         , 'FUSE_OPEN': self.open
         , 'FUSE_READ': self.read
         , 'FUSE_RELEASE': self.release
+        , 'FUSE_FORGET': dyn_nosend
+        , 'FUSE_WRITE': self.write
+        , 'FUSE_SETATTR': self.setattr
+        , 'FUSE_FLUSH': dyn_nop
     }
             

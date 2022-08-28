@@ -35,3 +35,14 @@ def mk_dyn_negotiate(major=7, minor=31, flags=0, options=None):
             )
     return dyn_negotiate
 
+async def dyn_nop(header, parsed):
+    '''
+    Do nothing.
+    '''
+    return 0, {}
+async def dyn_nosend(header, parsed):
+    '''
+    Do nothing, not even header replying.
+    '''
+    return 0, None
+

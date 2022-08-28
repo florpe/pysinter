@@ -8,17 +8,6 @@ from pysinter import FUSEError, ENCODING, BYTEORDER, frombytes
 
 INFINITY = float('inf')
 
-async def dyn_nop(header, parsed):
-    '''
-    Do nothing.
-    '''
-    return 0, {}
-async def dyn_nosend(header, parsed):
-    '''
-    Do nothing, not even header replying.
-    '''
-    return 0, None
-
 def _struct_key(inpt):
     fieldval = inpt[1]
     offset = fieldval['offset']
@@ -61,12 +50,20 @@ def _generate_fields(logger, schema, inpt, is_single_instance=False, is_struct=F
             continue
         struct = fshape.get('struct')
         if struct:
-            if fshape.get('zero_or_more') and not is_single_instance:
+            zero_or_more = fshape.get('zero_or_more')
+            if zero_or_more and not is_single_instance: # Edge case zero_or_more == 0 takes care of itself
+                if zero_or_more is True:
+                    zero_or_more = INFINITY
                 instances = inpt.get(fname, [])
                 if isinstance(instances, dict):
                     raise ValueError(
-                        'Zero-or-more struct fields demand an iterable of dicts'
-                        , fname, fshape, instances, inpt
+                        'Zero-or-more struct fields demand an iterable of dicts @@@@'
+                        , fname, '@@@@', fshape, '@@@@', instances, '@@@@', inpt
+                        )
+                if isinstance(zero_or_more, int) and zero_or_more < len(instances):
+                    raise ValueError(
+                        'Zero-or-more struct fields limit exceeded'
+                        , zero_or_more, len(instances), fname, '@@@@', fshape, '@@@@', instances, '@@@@', inpt
                         )
             else:
                 single_instance = inpt.get(fname, {})
@@ -148,6 +145,21 @@ def _parse_fields(logger, schema, inpt, position):
             continue
         struct = fshape.get('struct')
         if struct:
+            zero_or_more = fshape.get('zero_or_more')
+            if zero_or_more: # Edge case zero_or_more == 0 takes care of itself
+                structres = []
+                total_length = len(inpt)
+                maxcount = zero_or_more if isinstance(zero_or_more, int) else INFINITY
+                while position < total_length and len(structres) < maxcount:
+                    position, fval = _parse_fields(
+                        logger.getChild(struct[None]['structname'])
+                        , struct
+                        , inpt
+                        , position
+                        )
+                    structres.append(fval)
+                res[fname] = structres
+                continue
             position, fval = _parse_fields(
                 logger.getChild(struct[None]['structname'])
                 , struct
@@ -199,7 +211,7 @@ class Formatter():
             self._exception = NotImplementedError
         elif schema is None:
             self._schema = None
-            self._exception = ConnectionError(
+            self._exception = ValueError(
                 'This opcode does not support this operation'
                 , self._name
                 )
@@ -221,8 +233,8 @@ class Formatter():
             )
         if respos != len(inpt):
             raise ValueError(
-                'Incomplete parse'
-                , self._name, respos, res, self._schema, inpt
+                f'Incomplete parse in {self._name}, parsed to position {respos}'
+                ,self._schema, res, inpt[:respos], inpt[respos:]
                 )
         return res
     def generate_fields(self, inpt):

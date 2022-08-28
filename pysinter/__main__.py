@@ -33,14 +33,18 @@ async def main():
         try:
             await ops._complete_one(tx, header, msg)
             header, errno, resmsg = tx_sync.get()
-            try:
-                print('\nRegular reply', header, parsed, ops.parse_output(header.opcode, resmsg), '\n', resmsg.hex())
-            except ValueError:
-                pass
         except FUSEError as e:
             print('\nThrew error', header, parsed, e)
             errno = e.errno
             resmsg = b''
+        if resmsg is None:
+            print('\nNo reply necessary', header, parsed, resmsg)
+        else:
+            try:
+                parsed_output = ops.parse_output(header.opcode, resmsg)
+                print('\nRegular reply', header, parsed, parsed_output, '\nRaw reply body:', resmsg.hex())
+            except ValueError:
+                print('Value Error while parsing output', header, parsed, '\nRaw reply body:', resmsg.hex())
         s._send(header, errno, resmsg)
 
 

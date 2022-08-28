@@ -4,8 +4,8 @@ from os import getuid, getgid
 from stat import S_IFDIR, S_IFREG
 
 from pysinter import FUSEError, ROOT_INODE, MAX32, pad64, to32, to64
-from pysinter.dynamic import Operations, dyn_nop, dyn_nosend
-from pysinter.helper import fuse_negotiate, mk_dyn_negotiate
+from pysinter.dynamic import Operations
+from pysinter.helper import fuse_negotiate, mk_dyn_negotiate, dyn_nop, dyn_nosend
 
 FILE_HELLO = b'hello'
 INODE_HELLO = ROOT_INODE + 1
@@ -77,15 +77,15 @@ async def hello_lookup(header, parsed):
     if header.nodeid != ROOT_INODE:
         raise FUSEError(ENOENT)
     if parsed['name'] == FILE_HELLO:
-        return 0, {'entry': {
+        return 0, {'entry': [{
             ** ATTRS_HELLO
             , 'nodeId': INODE_HELLO
-            }}
+            }]}
     if parsed['name'] == FILE_HELLO2:
-        return 0, {'entry': {
+        return 0, {'entry': [{
             ** ATTRS_HELLO
             , 'nodeId': INODE_HELLO2
-            }}
+            }]}
     print('Bad filename', parsed['name'], parsed)
     raise FUSEError(ENOENT)
 
