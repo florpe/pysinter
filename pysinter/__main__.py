@@ -1,8 +1,9 @@
 
 from asyncio import run
-from json import load, dumps
+from json import loads, dumps
 from logging import getLogger
 from os import open as osopen, close as osclose, O_RDWR
+from pkgutil import get_data
 
 from pysinter import Sinter, MAX32, FUSEError
 from pysinter.dynamic import Operations
@@ -19,11 +20,10 @@ async def main():
     TODO: A bit of an interface. Specifying protocol location and version
             would be nice, for example.
     '''
-    with open('../sinter/protocol/protocol.json') as handle:
-        protocol = load(handle)
+    protocol = loads(get_data('pysinter', 'protocol/protocol-latest.json'))
     s = Sinter(fd='FUSEFD')
     pt = Passthrough('.')
-    ops = Operations(LOGGER, protocol["v7.31"], pt.make())
+    ops = Operations(LOGGER, protocol, pt.make())
     tx = s.tx_async
     tx_sync = s.tx_sync
     while True:
