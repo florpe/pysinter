@@ -57,13 +57,22 @@ class Passthrough():
         self._flags = flags
         return None
     def _path(self, ino, name=None):
-        return self._ino_to_path.setdefault(ino, name)
+        if name is not None:
+            self._ino_to_path[ino] = name
+        return self._ino_to_path.get(ino)
     async def getattr(self, header, parsed):
+        print('# GETTING ATTRIBUTE')
         node = header.nodeid
         if node == ROOT_INODE:
             node = self._root_ino
-        data = stat(self._path(node))
-        return 0, {'attr': stat_to_attr(data)}
+        try:
+            data = stat(self._path(node))
+        except FileNotFoundError as e:
+            print(f'# Attribute file not found, {node=} {self._path(node)=}')
+            raise FUSEError(ENOENT) from e
+        res = {'attr': stat_to_attr(data)}
+        print(f'# Attribute {node=}', res)
+        return 0, res
     async def lookup(self, header, parsed):
         node = header.nodeid
         if node == ROOT_INODE:
@@ -73,8 +82,7 @@ class Passthrough():
         try:
             data = stat(fullname, follow_symlinks=False)
         except FileNotFoundError as e:
-            # raise FUSEError(ENOENT) from e
-            return ENOENT, {'entry': []} # Works just the same as raise ...
+            raise FUSEError(ENOENT) from e
         ino = data.st_ino
         if ino == ROOT_INODE:
             raise NotImplementedError(
@@ -194,16 +202,13 @@ class Passthrough():
         #TODO: Flags
         #TODO: Locks
         node = header.nodeid
-        fd = parsed['fh']
         if node == ROOT_INODE:
             node = self._root_ino
         time_mode = parsed['timeandmode']
         fullpath = self._path(node)
         print('@@@@', fullpath, time_mode)
-        # chown(fd, parsed['uid'], parsed['gid'])
         chmod(fullpath, time_mode['mode'])
         utime(fullpath, times=(time_mode['atime'], time_mode['mtime']))
-        # utime(fd, times=(time_mode['atime'], time_mode['mtime']), ns=(time_mode['atimensec'], time_mode['mtimensec']))
         attr = stat_to_attr(stat(fullpath))
         return 0, {'attr': attr}
     def make(self):

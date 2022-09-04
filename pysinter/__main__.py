@@ -22,7 +22,7 @@ async def main():
     '''
     protocol = loads(get_data('pysinter', 'protocol/protocol-latest.json'))
     s = Sinter(fd='FUSEFD')
-    pt = Passthrough('.')
+    pt = Passthrough('../mnt')
     ops = Operations(LOGGER, protocol, pt.make())
     tx = s.tx_async
     tx_sync = s.tx_sync

@@ -146,7 +146,10 @@ class Sinter():
         sendbuf[:4] = to32(total)
         sendbuf[4:8] = (-errno).to_bytes(4, byteorder=BYTEORDER, signed=True)
         sendbuf[8:16] = header.unique
-        numsent = writev(self._fd, (sendbuf, msg))
+        try:
+            numsent = writev(self._fd, (sendbuf, msg))
+        except OSError as e:
+            raise e
         return (numsent == total)
     def recv_loop(self):
         '''
